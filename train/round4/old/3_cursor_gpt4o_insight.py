@@ -35,6 +35,31 @@ PARAMS = {
     
     # Data history
     'history_window': 100,  # Window for historical data
+    
+    # 回归模型参数
+    'regression_coefs': {
+        'intercept': 187.6120,
+        'sunlight': -3.3115,
+        'sugar_price': 4.9708,
+        'transport_fee': 61.5302,
+        'export_tariff': -62.5394,
+        'import_tariff': -52.0653
+    },
+    
+    # 交易参数
+    'price_buffer': 5.0,  # 价格缓冲区间
+    'imbalance_threshold': 0.2,  # 订单簿不平衡阈值
+    
+    # 技术分析参数
+    'ma_short_window': 10,  # 短期移动平均窗口
+    'ma_long_window': 50,   # 长期移动平均窗口
+    
+    # 市场微观结构参数
+    'depth_threshold': 5,  # 订单簿深度阈值
+    'spread_threshold': 0.1,  # 价差阈值
+    'volume_threshold': 3,  # 交易量阈值
+    'pressure_window': 10,  # 压力计算窗口
+    'pressure_threshold': 0.7,  # 压力阈值
 }
 
 class Trader:
@@ -72,41 +97,74 @@ class Trader:
         self.volatility = 0
         self.storage_cost = 0.1  # Fixed storage cost
         
-    def estimate_fair_price(self, observation):
-        """Calculate fair price based on regression coefficients from analysis"""
-        if observation is None:
-            return None
-            
-        # Extract observation factors
-        sunlight = getattr(observation, 'sunlightIndex', 0)
-        sugar_price = getattr(observation, 'sugarPrice', 0)
-        transport_fee = getattr(observation, 'transportFee', 0)
-        export_tariff = getattr(observation, 'exportTariff', 0)
-        import_tariff = getattr(observation, 'importTariff', 0)
+        # 回归模型系数
+        self.reg_coefs = PARAMS['regression_coefs']
         
-        # Apply regression formula
+    def calculate_ma(self, prices: List[float], window: int) -> float:
+        """计算移动平均"""
+        if len(prices) < window:
+            return prices[-1] if prices else 0
+        return sum(prices[-window:]) / window
+    
+    def estimate_fair_price(self, state: TradingState) -> float:
+        """使用回归模型估计公平价格"""
+        sugar_price = getattr(state.observations, 'sugarPrice', 0)
+        sunlight_index = getattr(state.observations, 'sunlightIndex', 0)
+        import_tariff = getattr(state.observations, 'importTariff', 0)
+        export_tariff = getattr(state.observations, 'exportTariff', 0)
+        transport_fee = getattr(state.observations, 'transportFee', 0)
+        
         fair_price = (
-            self.intercept +
-            self.sunlight_coef * sunlight +
-            self.sugar_price_coef * sugar_price +
-            self.transport_fee_coef * transport_fee +
-            self.export_tariff_coef * export_tariff +
-            self.import_tariff_coef * import_tariff -
-            self.storage_cost  # Include storage cost
+            self.reg_coefs['intercept'] +
+            self.reg_coefs['sunlight'] * sunlight_index +
+            self.reg_coefs['sugar_price'] * sugar_price +
+            self.reg_coefs['transport_fee'] * transport_fee +
+            self.reg_coefs['export_tariff'] * export_tariff +
+            self.reg_coefs['import_tariff'] * import_tariff
         )
         
         return fair_price
+    
+    def calculate_market_pressure(self, order_depth: OrderDepth) -> tuple[float, float]:
+        """计算市场买卖压力"""
+        buy_pressure = 0
+        sell_pressure = 0
         
-    def calculate_market_price(self, order_depth):
-        """Calculate mid price from order book"""
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
+        if order_depth.buy_orders:
+            for price, quantity in order_depth.buy_orders.items():
+                buy_pressure += price * quantity
             
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        mid_price = (best_bid + best_ask) / 2
+        if order_depth.sell_orders:
+            for price, quantity in order_depth.sell_orders.items():
+                sell_pressure += price * quantity
+            
+        total_pressure = buy_pressure + sell_pressure
+        if total_pressure > 0:
+            buy_pressure = buy_pressure / total_pressure
+            sell_pressure = sell_pressure / total_pressure
+            
+        return buy_pressure, sell_pressure
+    
+    def analyze_order_book_imbalance(self, order_depth: OrderDepth) -> float:
+        """分析订单簿不平衡度"""
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return 0
+            
+        buy_volume = 0
+        sell_volume = 0
         
-        return mid_price, best_bid, best_ask
+        for price, quantity in sorted(order_depth.buy_orders.items(), reverse=True)[:PARAMS['depth_threshold']]:
+            buy_volume += price * quantity
+            
+        for price, quantity in sorted(order_depth.sell_orders.items())[:PARAMS['depth_threshold']]:
+            sell_volume += price * quantity
+        
+        total_volume = buy_volume + sell_volume
+        if total_volume == 0:
+            return 0
+            
+        imbalance = (buy_volume - sell_volume) / total_volume
+        return imbalance
         
     def calculate_volatility(self):
         """Calculate price volatility for adaptive alpha"""
@@ -283,6 +341,17 @@ class Trader:
             self.volatility_history = self.volatility_history[-PARAMS['history_window']:]
             self.observation_history = self.observation_history[-PARAMS['history_window']:]
             
+    def calculate_market_price(self, order_depth):
+        """Calculate mid price from order book"""
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
+            
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        mid_price = (best_bid + best_ask) / 2
+        
+        return mid_price, best_bid, best_ask
+        
     def run(self, state: TradingState) -> tuple[Dict[str, List[Order]], int, Any]:
         """Main strategy execution method"""
         result = {}
@@ -305,7 +374,7 @@ class Trader:
                 observation = state.observations
         
         # Calculate fair price from regression model
-        fair_price = self.estimate_fair_price(observation)
+        fair_price = self.estimate_fair_price(state)
         
         # Calculate market price
         market_data = self.calculate_market_price(order_depth)
@@ -317,6 +386,16 @@ class Trader:
             
         # Update historical data
         self.update_history(position, fair_price, mid_price, observation)
+        
+        # Calculate market pressure
+        buy_pressure, sell_pressure = self.calculate_market_pressure(order_depth)
+        
+        # Calculate order book imbalance
+        imbalance = self.analyze_order_book_imbalance(order_depth)
+        
+        # Calculate technical indicators
+        ma_short = self.calculate_ma(self.price_history, PARAMS['ma_short_window'])
+        ma_long = self.calculate_ma(self.price_history, PARAMS['ma_long_window'])
         
         # Determine trading signals
         buy_signal, sell_signal = self.should_trade(fair_price, mid_price, position)

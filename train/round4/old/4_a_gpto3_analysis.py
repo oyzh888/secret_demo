@@ -1,6 +1,7 @@
 # ---------- Strategy A ----------
 import numpy as np
 from datamodel import Order, TradingState
+import json
 
 class Trader:
     """Baseline: Ridge fair‑value -> ε 回归做市"""
@@ -28,6 +29,17 @@ class Trader:
         self.position = 0
         self.tick = 0
         self.history = {'sugarPrice': [], 'sunlightIndex': []}
+
+    def serialize_state(self):
+        """将状态转换为可序列化的字典"""
+        return {
+            'position': self.position,
+            'tick': self.tick,
+            'history': {
+                'sugarPrice': list(map(float, self.history['sugarPrice'][-10:])),  # 只保留最近10个数据点
+                'sunlightIndex': list(map(float, self.history['sunlightIndex'][-10:]))
+            }
+        }
 
     # --------- helper ---------
     def fair_value(self, obs):
@@ -60,7 +72,7 @@ class Trader:
         
         # 获取最优买卖价
         if not bok.buy_orders or not bok.sell_orders:
-            return [], None, {}
+            return [], None, self.serialize_state()
             
         best_bid = max(bok.buy_orders.keys())
         best_ask = min(bok.sell_orders.keys())
@@ -102,4 +114,4 @@ class Trader:
                 self.position = 0
 
         self.tick += 1
-        return orders, None, {}
+        return orders, None, self.serialize_state()

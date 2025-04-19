@@ -21,6 +21,12 @@ class Trader:
             self.model: GradientBoostingRegressor = pickle.load(f)
         self.position = 0
 
+    def serialize_state(self):
+        """将状态转换为可序列化的字典"""
+        return {
+            'position': self.position
+        }
+
     # ---------- helpers ----------
     @staticmethod
     def imbalance(book):
@@ -35,7 +41,7 @@ class Trader:
         book = state.order_depths['MAGNIFICENT_MACARONS']
         
         if not book.buy_orders or not book.sell_orders:
-            return [], None, {}
+            return [], None, self.serialize_state()
             
         bb = max(book.buy_orders.keys())
         ba = min(book.sell_orders.keys())
@@ -71,4 +77,4 @@ class Trader:
             orders.append(Order('MAGNIFICENT_MACARONS', price, step))
             self.position += step
 
-        return orders, None, {}
+        return orders, None, self.serialize_state()
